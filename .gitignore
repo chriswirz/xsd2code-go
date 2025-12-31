@@ -1,0 +1,16 @@
+# Build and generation output.
+#
+# Every pattern here is anchored with a leading slash, so it matches only at the
+# repository root. An unanchored "gen/" matches a directory of that name at any
+# depth, which silently excluded internal/gen -- the package that emits every
+# language -- and left the build unable to resolve it.
+/dist/
+/build/
+/gen/
+/out/
+/xsd2code-go
+/xsd2code-go.exe
+*.exe
+
+# The binary the release pipeline stages for nfpm.
+/packaging/xsd2code-go

@@ -1,0 +1,419 @@
+.TH XSD2CODE-GO 1 "2026-08-31" "xsd2code-go" "User Commands"
+.SH NAME
+xsd2code-go \- generate data classes from XML Schema, and infer a schema from documents or a database
+.SH SYNOPSIS
+.B xsd2code-go generate
+.RI [ flags ]
+.IR schema.xsd ...
+.br
+.B xsd2code-go generate
+.RI [ flags ]
+.B \-\-database
+.I dsn
+.br
+.B xsd2code-go infer
+.RI [ flags ]
+.IR document.xml ...
+.br
+.B xsd2code-go infer
+.RI [ flags ]
+.B \-\-database
+.I dsn
+.br
+.B xsd2code-go version
+.br
+.B xsd2code-go help
+.RI [ command ]
+.SH DESCRIPTION
+.B xsd2code-go
+turns XML Schema documents into data classes for C#, Java, Go, Kotlin, Swift,
+TypeScript, JavaScript, Python, Rust and C++. The generated classes deserialize conforming
+XML through the target language's standard binding, in one call, and carry no
+behaviour of their own.
+.PP
+With
+.B \-\-postgres
+\(em which is on by default \(em the same run also emits the DDL to store those
+objects and annotates the classes to match it, so one object model serves both
+the wire format and the database.
+.PP
+The
+.B infer
+command goes the other way. Given example documents it derives a schema that
+describes them; given a PostgreSQL database it describes that instead, mapping
+foreign keys to nested content and link tables to repeated content.
+.PP
+Both commands accept
+.BR \-\-database ,
+so a database can be turned into a schema, or straight into classes, without a
+schema file in between.
+.SH COMMANDS
+.TP
+.B generate
+Read schemas (or a database) and write data classes.
+.TP
+.B infer
+Derive an XML Schema from documents or from a database.
+.TP
+.B version
+Print the version and exit.
+.TP
+.B help \fR[\fIcommand\fR]
+Print the overview, or one command's flags.
+.SH GENERATE OPTIONS
+.TP
+.BI \-\-lang " name"
+Target language. One of
+.BR go ", " csharp ", " java ", " kotlin ", " swift ", " typescript ", "
+.BR javascript ", " python ", " rust ", " cpp .
+The aliases
+.BR cs ", " kt ", " ts ", " js ", " py ", " rs ", " c++ " and " cxx
+are accepted. Default
+.BR go .
+.TP
+.BI \-\-out " dir"
+Directory to write into. Created if missing, along with any package
+directories the language's layout requires. Default the working directory.
+.TP
+.BI \-\-package " name"
+Go package, Java package, Rust module or JS/TS module name.
+.TP
+.BI \-\-namespace " name"
+C# or C++ namespace. An alias for
+.BR \-\-package ;
+a dotted name becomes nested C++ namespaces.
+.TP
+.BI \-\-postgres [=false]
+Add the persistence mapping and emit
+.IR schema.sql .
+Default true.
+.TP
+.BI \-\-table\-prefix " prefix"
+Prepend this to every generated table name, so two schemas can share one
+database without colliding.
+.TP
+.B \-\-ixmlserializable
+C# only. Emit classes that implement
+.B IXmlSerializable
+with generated readers and writers, instead of classes that
+.B XmlSerializer
+describes to itself by reflection. See
+.B C# WITHOUT REFLECTION
+below.
+.TP
+.B \-\-stdout
+Write every file to standard output, separated by a banner, instead of to disk.
+.TP
+.BI \-\-database " dsn"
+Read the model from a PostgreSQL database instead of a schema file. See
+.B DATABASES
+below.
+.TP
+.BI \-\-db\-schema " name"
+The Postgres schema to read. Default
+.BR public .
+.TP
+.B \-\-db\-views
+Include views and materialized views as well as tables.
+.TP
+.B \-\-db\-keys
+Keep generated surrogate keys as content. They are dropped by default.
+.TP
+.BI \-\-target\-namespace " uri"
+XML namespace for a model read with
+.BR \-\-database .
+.SH INFER OPTIONS
+.TP
+.BI \-\-out " file"
+Write the schema here instead of to standard output.
+.TP
+.BI \-\-target\-namespace " uri"
+Target namespace. Defaults to the namespace of the first document, or to none.
+.TP
+.BI \-\-max\-enum " n"
+Treat a field with at most
+.I n
+distinct values as an enumeration. 0 disables enumeration inference. Default 12.
+.TP
+.BI \-\-min\-enum\-samples " n"
+How many values must be seen before an enumeration is inferred. Default 8.
+.TP
+.B \-\-strings
+Give every value
+.B xs:string
+instead of inferring a datatype. Useful when the sample is too small for an
+inferred
+.B xs:int
+to be more than a guess.
+.TP
+.BI \-\-database " dsn"
+Describe a PostgreSQL database instead of XML documents.
+.TP
+.BR \-\-db\-schema ", " \-\-db\-views ", " \-\-db\-keys
+As for
+.BR generate .
+.SH OUTPUT
+.TS
+tab(;);
+l l l.
+\fBgo\fR;models.go, xsdtypes.go;encoding/xml, plus json and db tags
+\fBcsharp\fR;Models.cs, \fINamespace\fRDbContext.cs;XmlSerializer, EF Core
+\fBcsharp \-\-ixmlserializable\fR;the same files;generated IXmlSerializable, EF Core
+\fBjava\fR;one .java per type;JAXB (jakarta.xml.bind), JPA
+\fBkotlin\fR;Models.kt;data classes over the JDK's DOM
+\fBswift\fR;Models.swift;structs over XMLParser
+\fBtypescript\fR;models.ts;readers over the DOM
+\fBjavascript\fR;models.js, models.d.ts;the same, typed by declaration
+\fBpython\fR;models.py;dataclasses over ElementTree
+\fBrust\fR;models.rs;serde with quick-xml
+\fBcpp\fR;models.hpp, models.cpp;pugixml
+;schema.sql;with \fB\-\-postgres\fR, for every language
+.TE
+.PP
+The Go, Python, Kotlin and Swift output has no dependencies at all: Kotlin uses
+the DOM the JDK ships, and Swift builds a small tree on Foundation's XMLParser,
+which -- unlike XMLDocument -- exists on every platform Swift runs on. TypeScript and JavaScript
+need a DOM: browsers have one, and on the server
+.B @xmldom/xmldom
+registered as
+.B globalThis.DOMParser
+will do. Rust needs
+.B serde
+and
+.BR quick-xml ;
+C++ needs
+.BR pugixml ;
+Java needs
+.B jakarta.xml.bind
+and, for the persistence annotations,
+.BR jakarta.persistence .
+The generated files name their own dependencies in a header comment.
+.SH C# WITHOUT REFLECTION
+.PP
+.B \-\-ixmlserializable
+emits the same classes, with the same members, reading and writing themselves
+through
+.B IXmlSerializable
+instead of being described to
+.B XmlSerializer
+by attribute.
+.PP
+XmlSerializer reflects over a type the first time it sees it and emits an
+assembly to do the work. That costs a pause on the first document, and it is
+why the attribute-based output cannot be published with trimming or NativeAOT
+without warnings. The generated members name every property directly, so the
+whole path is ordinary compiled code over
+.B XmlReader
+and
+.BR XmlWriter .
+.PP
+The format handles for itself everything XmlSerializer would otherwise do:
+inheritance, through virtual members a derived type overrides and calls
+.B base
+on;
+.B xsi:type
+, through a generated factory per base type;
+.BR xsi:nil ;
+enumerations, through a generated Parse and Format pair over the lexical
+values;
+.BR xs:list ,
+split and joined in generated code, which drops the string companion property
+the attribute format needs; and
+.BR any / anyAttribute ,
+kept as XmlElement and XmlAttribute arrays and written back as they arrived.
+.PP
+The classes keep the same shape in both formats, so switching is a
+regeneration rather than a rewrite of the calling code, and the Entity
+Framework mapping is emitted either way.
+.SH MAPPING
+.TS
+tab(;);
+l l.
+\fBcomplexType\fR;a class
+\fBextension\fR;inheritance, where the language has it
+\fBrestriction\fR;a flattened standalone class
+\fBsimpleContent\fR;a Value member plus the attributes
+\fBsimpleType\fR with \fBenumeration\fR;an enum carrying each lexical value
+any other \fBsimpleType\fR;the primitive it ultimately restricts
+\fBgroup\fR, \fBattributeGroup\fR;expanded inline at the point of reference
+\fBchoice\fR;optional members, documented as exclusive
+\fBminOccurs="0"\fR;nullable, so absent and zero stay distinct
+\fBmaxOccurs\fR>1;a collection, never also nullable
+\fBlist\fR;one element or attribute split on whitespace
+\fBany\fR, \fBanyAttribute\fR;raw XML, and name/value pairs
+anonymous inline types;a class named for the element that owns it
+.TE
+.PP
+C# is the exception to the nullability row above: XmlSerializer will not bind a
+.B Nullable<T>
+to an attribute, for any T, so an optional attribute is generated as a plain
+value beside the
+.B Specified
+companion property that XmlSerializer does understand \(em the same shape
+.B xsd.exe
+produces. Optional elements are still nullable. The
+.B \-\-ixmlserializable
+format keeps that shape too, so the two formats stay interchangeable.
+.PP
+Kotlin, Swift and Rust have no inheritance that a data class or a struct can
+use, so an extension's inherited members are written into each type that
+extends it. The XML is identical to what an inheriting language produces; only
+the generated type is flat.
+.PP
+Two decisions are worth knowing about. A
+.B restriction
+is flattened rather than subclassed, because it removes members from its base
+and no target language can say that; XSD requires a restriction to restate what
+it keeps, so nothing is lost. A
+.B choice
+becomes ordinary optional members, because modelling it faithfully would cost
+the plain-object shape that makes deserialization one call; the exclusivity is
+recorded in the generated documentation instead.
+.PP
+Anything that had to be approximated is printed as a warning on standard error.
+.SH POSTGRES
+With
+.BR \-\-postgres ,
+each class gets a table and a surrogate
+.B id
+\(em XML documents carry no dependable identity of their own \(em which is
+excluded from serialization. Inheritance is joined-table: a derived type's
+primary key is also a foreign key onto its base, which is EF Core's TPT and
+JPA's JOINED, and what the DDL creates.
+.PP
+A single-valued complex member becomes a foreign key column. A repeated one
+becomes a link table with an
+.B ordinal
+column, because document order is data and a set of rows has none. A repeated
+primitive or an
+.B xs:list
+becomes a Postgres array. An enumeration becomes
+.B text
+with a CHECK constraint, rather than a Postgres enum type that every ORM maps
+differently.
+.PP
+Every foreign key is added as a separate ALTER TABLE after the tables, so a
+recursive schema has no ordering problem. The schema's own documentation is
+carried into COMMENT ON statements.
+.SH DATABASES
+.B \-\-database
+takes a URL
+.RI ( postgres://user:pw@host/db )
+or libpq keyword/value pairs
+.RI ( "host=... dbname=..." ).
+.BR PGPASSWORD ,
+.B PGSERVICE
+and
+.I ~/.pgpass
+are honoured, so a password need never appear on the command line \(em where it
+would be visible to every other process on the machine and recorded in the
+shell's history.
+.PP
+Reading a database produces one complex type per table. A single-column foreign
+key becomes nested content: the row it points at, in place. A table that exists
+only to join two others becomes repeated content on the parent. An array column
+becomes a repeated value. A CHECK constraint pinning a column to a fixed set, or
+a Postgres enum type, becomes an enumeration. Table and column comments become
+.BR xs:documentation .
+A table whose single-column primary key is also a foreign key onto another
+table's key is a joined-table subclass, and becomes an
+.B xs:extension
+of it. Tables that nothing references are declared as the document roots.
+.PP
+What a relational schema cannot tell you, it does not guess: nothing records
+which values were attributes, which were child elements and which were an
+element's own text content, so everything comes back as an element. A schema
+taken through
+.B generate
+and back is equivalent in structure, not identical in spelling.
+.PP
+A model read this way keeps the names it found: the table, the columns and the
+primary key are facts about a database that already exists, and are not
+re-derived.
+.SH INFERENCE
+A schema inferred from documents describes the samples, not the format. Read it
+before treating it as a contract.
+.PP
+Structure is merged by element name, so an element appearing in three places
+produces one type.
+.B minOccurs
+is 0 unless the child appeared in every instance of its parent;
+.B maxOccurs
+is unbounded if any single parent held more than one; an attribute is required
+only if it was present on every occurrence.
+.PP
+Order stays an
+.B xs:sequence
+as long as every document's children are a subsequence of the order first seen.
+Documents that genuinely disagree produce a repeated
+.BR xs:choice .
+.PP
+Datatypes are inferred subtractively: a type stays a candidate until a value
+rules it out, so one
+.RB \(lq N/A \(rq
+in a column of numbers demotes the field to a string. 0 and 1 are integers
+unless something spelled out
+.B true
+or
+.BR false .
+Enumerations need repetition, not merely few values: a field whose every value
+is distinct is an identifier, and is left alone.
+.SH EXIT STATUS
+0 on success, 1 on any error. Warnings do not affect the exit status.
+.SH EXAMPLES
+Generate C# with Entity Framework mapping and the DDL:
+.PP
+.RS
+.EX
+xsd2code-go generate --lang csharp --namespace Contoso.Orders \\
+    --out ./gen order.xsd
+.EE
+.RE
+.PP
+Generate Go with no persistence mapping:
+.PP
+.RS
+.EX
+xsd2code-go generate --lang go --package orders --postgres=false order.xsd
+.EE
+.RE
+.PP
+Derive a schema from a directory of samples, then generate from it:
+.PP
+.RS
+.EX
+xsd2code-go infer --out order.xsd samples/
+xsd2code-go generate --lang java --package com.contoso.orders order.xsd
+.EE
+.RE
+.PP
+Describe a live database as a schema, then as TypeScript:
+.PP
+.RS
+.EX
+xsd2code-go infer --database "postgres://localhost/orders" --out db.xsd
+xsd2code-go generate --lang typescript --database "postgres://localhost/orders" \\
+    --out ./src
+.EE
+.RE
+.SH FILES
+.TP
+.I /usr/share/doc/xsd2code-go/examples/
+An example schema and a document that conforms to it, installed by the
+.B .deb
+and
+.B .rpm
+packages.
+.SH SEE ALSO
+.BR psql (1),
+.BR xmllint (1)
+.PP
+Home page and issue tracker:
+.UR https://github.com/chriswirz/xsd2code-go
+.UE
+.SH BUGS
+Multi-column foreign keys are not turned into nested content: there is no
+sensible reading of one as a single element, so the columns stay ordinary
+values. Schema documents are never fetched over the network, so an
+.B xs:import
+that names only a URL is reported and its types become strings.

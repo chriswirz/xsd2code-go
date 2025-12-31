@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<catalog updated="2024-01-05T08:00:00Z">
+  <product sku="872-AA" status="active">
+    <name>Lawnmower</name>
+    <price>148.95</price>
+    <stock>12</stock>
+  </product>
+  <product sku="926-AA" status="active">
+    <name>Baby Monitor</name>
+    <price>39.98</price>
+    <stock>4</stock>
+  </product>
+</catalog>

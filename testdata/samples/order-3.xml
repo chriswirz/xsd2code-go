@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<catalog updated="2024-03-02T08:00:00Z">
+  <product sku="551-QQ" status="active">
+    <name>Watering Can</name>
+    <price>9</price>
+    <stock>140</stock>
+  </product>
+  <product sku="552-QQ" status="backordered">
+    <name>Trowel</name>
+    <price>4.25</price>
+    <stock>0</stock>
+    <note>Due 2024-04-01.</note>
+  </product>
+</catalog>

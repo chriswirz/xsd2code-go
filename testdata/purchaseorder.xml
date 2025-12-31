@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<purchaseOrder xmlns="http://example.com/po" orderDate="1999-10-20" status="shipped"
+               modifiedBy="ada" modifiedAt="1999-10-21T09:30:00Z">
+  <shipTo country="US">
+    <name>Alice Smith</name>
+    <street>123 Maple Street</street>
+    <street>Apartment 4</street>
+    <city>Mill Valley</city>
+    <state>CA</state>
+    <zip>90952</zip>
+  </shipTo>
+  <billTo country="US">
+    <name>Robert Smith</name>
+    <street>8 Oak Avenue</street>
+    <city>Old Town</city>
+    <state>PA</state>
+    <zip>95819</zip>
+  </billTo>
+  <comment>Hurry, my lawn is going wild!</comment>
+  <items>
+    <item partNum="872-AA">
+      <productName>Lawnmower</productName>
+      <quantity>1</quantity>
+      <price currency="USD">148.95</price>
+      <tags>garden power outdoor</tags>
+    </item>
+    <item partNum="926-AA">
+      <productName>Baby Monitor</productName>
+      <quantity>2</quantity>
+      <price currency="USD">39.98</price>
+      <shipDate>1999-05-21</shipDate>
+    </item>
+  </items>
+  <creditCard>
+    <reference>xxxx-4242</reference>
+    <amount currency="USD">228.91</amount>
+  </creditCard>
+</purchaseOrder>

@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema"
+           xmlns:tns="urn:tree" targetNamespace="urn:tree"
+           elementFormDefault="qualified">
+
+  <xs:annotation>
+    <xs:documentation>
+      A tree: an element that contains itself. Every language has to say this
+      somehow, and several of them cannot say it by value.
+    </xs:documentation>
+  </xs:annotation>
+
+  <xs:element name="tree" type="tns:Node"/>
+
+  <xs:complexType name="Node">
+    <xs:sequence>
+      <xs:element name="label" type="xs:string"/>
+      <xs:element name="parent" type="tns:Node" minOccurs="0"/>
+      <xs:element name="child" type="tns:Node" minOccurs="0" maxOccurs="unbounded"/>
+    </xs:sequence>
+  </xs:complexType>
+</xs:schema>

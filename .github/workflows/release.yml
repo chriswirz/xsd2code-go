@@ -1,0 +1,985 @@
+name: build-and-publish
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  # The version is computed once and consumed by every later job, so the
+  # binary's version output and the release tag cannot drift apart.
+  # v0.1.<run number, four digits>: monotonic, sortable, and it says which run
+  # produced a binary without consulting anything.
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.compute.outputs.version }}
+      number: ${{ steps.compute.outputs.number }}
+    steps:
+      - id: compute
+        run: |
+          number="$(printf '%04d' "${{ github.run_number }}")"
+          echo "number=${number}" >> "$GITHUB_OUTPUT"
+          echo "version=0.1.${number}" >> "$GITHUB_OUTPUT"
+          echo "building v0.1.${number}"
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+      - name: Check formatting
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "These files need gofmt:"
+            echo "$unformatted"
+            exit 1
+          fi
+      # A source directory that matches a .gitignore rule is not committed, and
+      # the build then fails with "no required module provides package", which
+      # points at the module system rather than at the real cause.
+      - name: No source directory is excluded by .gitignore
+        run: |
+          excluded=""
+          for dir in $(find cmd internal -type d); do
+            # --no-index, because check-ignore skips tracked paths by default
+            # and a file force-added past a bad rule is exactly the case to
+            # catch: it is committed here but excluded from a fresh clone.
+            if git check-ignore -q --no-index "$dir"; then
+              excluded="$excluded $dir"
+            fi
+          done
+          if [ -n "$excluded" ]; then
+            echo "These source directories match a .gitignore rule:$excluded"
+            echo "Anchor the rule with a leading slash so it applies at the root only."
+            exit 1
+          fi
+      - run: go vet ./...
+      # The suite includes a test that writes the generated Go package to a
+      # temporary module, compiles it and unmarshals a real document with it.
+      # That is the only test that proves the output works rather than merely
+      # looks right, so it runs here in full.
+      - run: go test ./...
+
+  # Go has the same job as every other language, even though the unit suite
+  # already compiles and runs the generated package: a job per language is what
+  # makes the matrix legible, and a test inside "go test ./..." that skips
+  # itself is indistinguishable from one that passed.
+  golang:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+      - name: Generate, build and run against a real document
+        run: |
+          go run ./cmd/xsd2code-go generate --lang go --package orders \
+            --out build/go testdata/purchaseorder.xsd
+          cd build/go
+          cp ../../testdata/purchaseorder.xml .
+          # Its own module, with no dependencies: the generated package must
+          # stand on the standard library alone.
+          cat > go.mod <<'EOF'
+          module orders
+
+          go 1.25
+          EOF
+          cat > check_test.go <<'EOF'
+          package orders
+
+          import (
+              "encoding/xml"
+              "strings"
+              "testing"
+          )
+
+          func TestParsesTheSample(t *testing.T) {
+              order, err := LoadPurchaseOrder("purchaseorder.xml")
+              if err != nil {
+                  t.Fatal(err)
+              }
+
+              // An attribute bound through a generated adapter type.
+              if got := order.OrderDate.String(); got != "1999-10-20" {
+                  t.Errorf("orderDate = %q", got)
+              }
+              // An optional attribute with an enumerated type.
+              if order.Status == nil || *order.Status != OrderStatusShipped {
+                  t.Fatalf("status = %v", order.Status)
+              }
+              if !order.Status.Valid() {
+                  t.Error("shipped should be a declared value")
+              }
+              // Inherited content: the embedded base type's fields.
+              if order.ShipTo == nil || order.ShipTo.Name != "Alice Smith" {
+                  t.Fatalf("shipTo = %+v", order.ShipTo)
+              }
+              if len(order.ShipTo.Street) != 2 || order.ShipTo.Street[1] != "Apartment 4" {
+                  t.Errorf("street = %v", order.ShipTo.Street)
+              }
+              // Repeated complex content.
+              if order.Items == nil || len(order.Items.Item) != 2 {
+                  t.Fatalf("items = %+v", order.Items)
+              }
+              first := order.Items.Item[0]
+              if first.PartNum != "872-AA" || first.ProductName != "Lawnmower" || first.Quantity != 1 {
+                  t.Errorf("first item = %+v", first)
+              }
+              // Simple content: a value with an attribute on it.
+              if first.Price == nil || first.Price.Value != "148.95" || first.Price.Currency != "USD" {
+                  t.Errorf("price = %+v", first.Price)
+              }
+              // An xs:list is one element holding many values.
+              if len(first.Tags) != 3 || first.Tags[0] != "garden" {
+                  t.Errorf("tags = %v", first.Tags)
+              }
+              // An absent optional element stays nil rather than becoming zero.
+              if first.ShipDate != nil {
+                  t.Errorf("shipDate should be absent, got %v", first.ShipDate)
+              }
+              if second := order.Items.Item[1]; second.ShipDate == nil || second.ShipDate.String() != "1999-05-21" {
+                  t.Errorf("second shipDate = %v", second.ShipDate)
+              }
+              // Only one arm of the choice is populated.
+              if order.CreditCard == nil || order.Invoice != nil {
+                  t.Errorf("choice = %+v / %+v", order.CreditCard, order.Invoice)
+              }
+          }
+
+          func TestRoundTrip(t *testing.T) {
+              order, err := LoadPurchaseOrder("purchaseorder.xml")
+              if err != nil {
+                  t.Fatal(err)
+              }
+              out, err := xml.Marshal(order)
+              if err != nil {
+                  t.Fatal(err)
+              }
+              again, err := UnmarshalPurchaseOrder(out)
+              if err != nil {
+                  t.Fatalf("re-parsing our own output failed: %v\n%s", err, out)
+              }
+              if again.ShipTo.City != order.ShipTo.City || len(again.Items.Item) != len(order.Items.Item) {
+                  t.Errorf("round trip lost content:\n%s", out)
+              }
+              if !strings.Contains(string(out), "purchaseOrder") {
+                  t.Errorf("the root element name was not preserved:\n%s", out)
+              }
+          }
+          EOF
+          # The generated files must be gofmt-clean -- the generator runs
+          # format.Source, so anything else is a bug. The harness written above
+          # by heredoc is not generated code, so it is formatted rather than
+          # judged.
+          unformatted="$(gofmt -l models.go xsdtypes.go)"
+          if [ -n "$unformatted" ]; then
+            echo "the generated Go is not gofmt-clean: $unformatted"
+            exit 1
+          fi
+          gofmt -w check_test.go
+          GOFLAGS=-mod=mod GOPROXY=off go vet ./...
+          GOFLAGS=-mod=mod GOPROXY=off go test -v ./...
+
+  # The generated C# and Java are compiled and then run against a real
+  # document. Compiling alone proved too weak a check: XmlSerializer rejects
+  # several shapes that compile perfectly well, and an EF Core mapping is only
+  # validated when the model is built.
+  # The C# generator has two formats: the classes XmlSerializer describes to
+  # itself by reflection, and the classes that read and write themselves
+  # through IXmlSerializable. Both are compiled and run against the sample,
+  # because the shapes that break are not the shapes that fail to compile.
+  csharp:
+    runs-on: ubuntu-latest
+    name: csharp (${{ matrix.format }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - format: attributes
+            flags: ""
+          - format: ixmlserializable
+            flags: "--ixmlserializable"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0"
+      - name: Generate
+        run: |
+          go run ./cmd/xsd2code-go generate --lang csharp ${{ matrix.flags }} \
+            --namespace Generated.Orders --out build/csharp testdata/purchaseorder.xsd
+      # The formats are told apart by what they contain, not only by what they
+      # do: an --ixmlserializable run that quietly fell back to attributes would
+      # still pass every assertion in the program below.
+      - name: The output is in the format that was asked for
+        run: |
+          cd build/csharp
+          fail() { echo "$1"; exit 1; }
+          present() { grep -qF "$1" Models.cs || fail "Models.cs is missing $1"; }
+          absent() { if grep -qF "$1" Models.cs; then fail "Models.cs should not contain $1"; fi; }
+
+          # Both formats offer the same entry points, which is what makes the
+          # choice of format a regeneration rather than a rewrite.
+          present "public static string ToXmlPurchaseOrder"
+          present "public static void SavePurchaseOrder"
+          present "public static PurchaseOrderType LoadPurchaseOrder"
+          present "public static PurchaseOrderType ParsePurchaseOrder"
+
+          if [ "${{ matrix.format }}" = "ixmlserializable" ]; then
+            present "IXmlSerializable"
+            present "public void ReadXml(XmlReader reader)"
+            present "public static AddressBase Create(XmlReader reader)"
+            # The point of the format: nothing on the serialization path may
+            # reach for reflection, directly or through XmlSerializer.
+            absent "XmlSerializer("
+            absent "[XmlElement("
+            absent "[XmlAttribute("
+            absent "[XmlEnum("
+            absent "System.Reflection"
+            absent "GetCustomAttribute"
+            # The string companion an xs:list needs only in order to satisfy
+            # XmlSerializer.
+            absent "TagsSerialized"
+          else
+            present "XmlSerializer("
+            present "[XmlElement("
+            present "TagsSerialized"
+            absent "IXmlSerializable"
+          fi
+      - name: Compile and run against a real document
+        run: |
+          cd build/csharp
+          cp ../../testdata/purchaseorder.xml .
+          cat > Generated.csproj <<'PROJ'
+          <Project Sdk="Microsoft.NET.Sdk">
+            <PropertyGroup>
+              <OutputType>Exe</OutputType>
+              <TargetFramework>net8.0</TargetFramework>
+              <Nullable>disable</Nullable>
+              <!-- The generated code is data classes; a missing XML doc comment
+                   on a property is not a finding worth failing a build over. -->
+              <NoWarn>CS1591</NoWarn>
+            </PropertyGroup>
+            <ItemGroup>
+              <PackageReference Include="Microsoft.EntityFrameworkCore" Version="8.0.8" />
+              <PackageReference Include="Npgsql.EntityFrameworkCore.PostgreSQL" Version="8.0.8" />
+            </ItemGroup>
+          </Project>
+          PROJ
+          cat > Check.cs <<'CHECK'
+          using System;
+          using System.Diagnostics;
+          using System.Linq;
+          using Generated.Orders;
+          using Microsoft.EntityFrameworkCore;
+
+          public static class Check
+          {
+              public static void Main()
+              {
+                  var order = XmlDocuments.LoadPurchaseOrder("purchaseorder.xml");
+                  Verify(order, "read from the file");
+
+                  // The document writers, which are the same in both formats: a
+                  // document as text, and a document on disk. Each is read back
+                  // and checked member by member, because a writer that drops a
+                  // member still produces a document that parses.
+                  var xml = XmlDocuments.ToXmlPurchaseOrder(order);
+                  Debug.Assert(xml.Contains("<purchaseOrder"), "ToXml wrote a document element");
+                  Debug.Assert(xml.Contains("orderDate=\"1999-10-20"), "ToXml wrote the attributes");
+                  // The text announces UTF-8, so it must not open with the mark
+                  // a StringWriter's own UTF-16 encoding would put there.
+                  Debug.Assert(xml[0] != '\uFEFF', "no byte order mark in the returned text");
+                  Verify(XmlDocuments.ParsePurchaseOrder(xml), "round tripped through a string");
+
+                  XmlDocuments.SavePurchaseOrder("written.xml", order);
+                  Verify(XmlDocuments.LoadPurchaseOrder("written.xml"), "round tripped through a file");
+
+                  CheckEntityFrameworkModel();
+                  Console.WriteLine("csharp: parsed the sample, wrote it and read it back");
+              }
+
+              private static void Verify(PurchaseOrderType order, string stage)
+              {
+                  // Attributes, one of them an optional enum: an optional
+                  // attribute carries its absence in the Specified companion in
+                  // both formats, so that the two stay interchangeable.
+                  Debug.Assert(order.OrderDate == new DateTime(1999, 10, 20), stage + ": orderDate");
+                  Debug.Assert(order.StatusSpecified && order.Status == OrderStatus.Shipped, stage + ": status");
+                  Debug.Assert(order.ModifiedBy == "ada", stage + ": modifiedBy");
+                  Debug.Assert(order.ModifiedAtSpecified, stage + ": modifiedAt");
+
+                  // Inherited content: Name and Street come from AddressBase.
+                  Debug.Assert(order.ShipTo is AddressBase, stage + ": USAddress extends AddressBase");
+                  Debug.Assert(order.ShipTo.Name == "Alice Smith", stage + ": shipTo.Name");
+                  Debug.Assert(order.ShipTo.Street.Count == 2, stage + ": street count");
+                  Debug.Assert(order.ShipTo.Street[1] == "Apartment 4", stage + ": street[1]");
+                  Debug.Assert(order.ShipTo.Zip == 90952m, stage + ": zip");
+                  Debug.Assert(order.BillTo.State == "PA", stage + ": billTo.State");
+                  Debug.Assert(order.Comment == "Hurry, my lawn is going wild!", stage + ": comment");
+
+                  // Repeated complex content.
+                  Debug.Assert(order.Items.Item.Count == 2, stage + ": item count");
+                  var first = order.Items.Item[0];
+                  Debug.Assert(first.PartNum == "872-AA", stage + ": partNum");
+                  Debug.Assert(first.Quantity == 1, stage + ": quantity");
+
+                  // Simple content: a value with an attribute on it.
+                  Debug.Assert(first.Price.Value == 148.95m, stage + ": price value");
+                  Debug.Assert(first.Price.Currency == "USD", stage + ": price currency");
+
+                  // An xs:list is one value on the wire, a collection in the object.
+                  Debug.Assert(first.Tags.SequenceEqual(new[] { "garden", "power", "outdoor" }), stage + ": tags");
+
+                  // An absent optional element stays null, through the write as
+                  // well as the read: shipDate is nillable, so it goes out as
+                  // xsi:nil and has to come back as absent rather than as a date.
+                  Debug.Assert(first.ShipDate == null, stage + ": shipDate absent");
+                  Debug.Assert(order.Items.Item[1].ShipDate == new DateTime(1999, 5, 21), stage + ": shipDate present");
+
+                  // Only one arm of the choice is populated.
+                  Debug.Assert(order.CreditCard != null && order.Invoice == null, stage + ": choice");
+                  Debug.Assert(order.CreditCard.Amount.Value == 228.91m, stage + ": amount");
+              }
+
+              // The EF Core model is validated only when it is built, so a bad
+              // mapping surfaces here and nowhere earlier. It is emitted in both
+              // formats, and neither may disturb it.
+              private static void CheckEntityFrameworkModel()
+              {
+                  var options = new DbContextOptionsBuilder<OrdersDbContext>()
+                      .UseNpgsql("Host=localhost;Database=none")
+                      .Options;
+                  using (var db = new OrdersDbContext(options))
+                  {
+                      var model = db.Model;
+                      var po = model.FindEntityType(typeof(PurchaseOrderType)).GetTableName();
+                      var address = model.FindEntityType(typeof(USAddress)).GetTableName();
+                      Debug.Assert(po == "purchase_order_type", "table name: " + po);
+                      Debug.Assert(address == "us_address", "derived table: " + address);
+                      Console.WriteLine($"csharp: the EF model has {model.GetEntityTypes().Count()} entity types");
+                  }
+              }
+          }
+          CHECK
+          # Debug, so the assertions above are compiled in rather than stripped.
+          dotnet run -c Debug
+
+  java:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      - name: Generate, compile and run against a real document
+        run: |
+          go run ./cmd/xsd2code-go generate --lang java \
+            --package generated.orders --out build/java testdata/purchaseorder.xsd
+          cd build/java
+          cat > pom.xml <<'EOF'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <project xmlns="http://maven.apache.org/POM/4.0.0">
+            <modelVersion>4.0.0</modelVersion>
+            <groupId>generated</groupId>
+            <artifactId>orders</artifactId>
+            <version>1.0</version>
+            <properties>
+              <maven.compiler.release>21</maven.compiler.release>
+              <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+            </properties>
+            <build><sourceDirectory>.</sourceDirectory></build>
+            <dependencies>
+              <dependency>
+                <groupId>jakarta.xml.bind</groupId>
+                <artifactId>jakarta.xml.bind-api</artifactId>
+                <version>4.0.2</version>
+              </dependency>
+              <dependency>
+                <groupId>jakarta.persistence</groupId>
+                <artifactId>jakarta.persistence-api</artifactId>
+                <version>3.1.0</version>
+              </dependency>
+            </dependencies>
+          </project>
+          EOF
+          cp ../../testdata/purchaseorder.xml .
+          cat > Check.java <<'EOF'
+          import generated.orders.*;
+          import java.io.File;
+          import java.util.List;
+
+          public class Check {
+              static void check(boolean ok, String what) {
+                  if (!ok) {
+                      throw new AssertionError(what);
+                  }
+              }
+
+              public static void main(String[] args) throws Exception {
+                  PurchaseOrderType order = XmlDocuments.loadPurchaseOrder(new File("purchaseorder.xml"));
+
+                  check(order.getOrderDate().toString().equals("1999-10-20"), "orderDate");
+                  check(order.getStatus() == OrderStatus.SHIPPED, "status");
+                  check(order.getModifiedBy().equals("ada"), "modifiedBy");
+
+                  // Inherited content, through the base class.
+                  check(order.getShipTo() instanceof AddressBase, "USAddress extends AddressBase");
+                  check(order.getShipTo().getName().equals("Alice Smith"), "shipTo name");
+                  List<String> street = order.getShipTo().getStreet();
+                  check(street.size() == 2 && street.get(1).equals("Apartment 4"), "street");
+
+                  // Repeated complex content.
+                  List<ItemsItem> items = order.getItems().getItem();
+                  check(items.size() == 2, "item count");
+                  ItemsItem first = items.get(0);
+                  check(first.getPartNum().equals("872-AA"), "partNum");
+                  check(first.getQuantity() == 1, "quantity");
+
+                  // Simple content: a value with an attribute on it.
+                  check(first.getPrice().getValue().toPlainString().equals("148.95"), "price value");
+                  check(first.getPrice().getCurrency().equals("USD"), "price currency");
+
+                  // An xs:list arrives split.
+                  check(first.getTags().equals(List.of("garden", "power", "outdoor")), "tags: " + first.getTags());
+
+                  // An absent optional element stays null.
+                  check(first.getShipDate() == null, "shipDate absent");
+                  check(items.get(1).getShipDate().toString().equals("1999-05-21"), "shipDate present");
+
+                  // Only one arm of the choice is populated.
+                  check(order.getCreditCard() != null && order.getInvoice() == null, "choice");
+
+                  System.out.println("java: parsed the sample, " + items.size() + " items");
+              }
+          }
+          EOF
+          # A JAXB implementation is needed to run, not merely to compile, so
+          # it is added to the pom before the classpath is resolved.
+          sed -i 's#</dependencies>#<dependency><groupId>org.glassfish.jaxb</groupId><artifactId>jaxb-runtime</artifactId><version>4.0.5</version></dependency></dependencies>#' pom.xml
+          mvn -B -q compile
+          mvn -B -q dependency:build-classpath -Dmdep.outputFile=cp.txt
+          javac -cp "target/classes:$(cat cp.txt)" -d target/classes Check.java
+          java -cp "target/classes:$(cat cp.txt)" Check
+
+  kotlin:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      - uses: fwilhe2/setup-kotlin@main
+        with:
+          version: 2.0.21
+      - name: Generate, compile and run against a real document
+        run: |
+          go run ./cmd/xsd2code-go generate --lang kotlin \
+            --package generated.orders --out build/kotlin testdata/purchaseorder.xsd
+          cd build/kotlin
+          cp ../../testdata/purchaseorder.xml .
+          cat > Check.kt <<'EOF'
+          import generated.orders.*
+          import java.io.File
+
+          fun check(ok: Boolean, what: String) {
+              if (!ok) throw AssertionError(what)
+          }
+
+          fun main() {
+              val order = loadPurchaseOrder(File("purchaseorder.xml"))
+
+              check(order.orderDate == "1999-10-20", "orderDate: ${order.orderDate}")
+              check(order.status == OrderStatus.SHIPPED, "status: ${order.status}")
+              check(order.modifiedBy == "ada", "modifiedBy")
+
+              // Inherited members, declared on the derived data class because a
+              // Kotlin data class cannot extend one.
+              check(order.shipTo.name == "Alice Smith", "shipTo.name")
+              check(order.shipTo.street == listOf("123 Maple Street", "Apartment 4"), "street")
+              check(order.shipTo.zip.toPlainString() == "90952", "zip")
+
+              // Repeated complex content.
+              check(order.items.item.size == 2, "item count")
+              val first = order.items.item[0]
+              check(first.partNum == "872-AA", "partNum")
+              check(first.quantity == 1L, "quantity")
+
+              // Simple content: a value with an attribute on it.
+              check(first.price.value.toPlainString() == "148.95", "price value")
+              check(first.price.currency == "USD", "price currency")
+
+              // An xs:list arrives split.
+              check(first.tags == listOf("garden", "power", "outdoor"), "tags")
+
+              // An absent optional element stays null.
+              check(first.shipDate == null, "shipDate absent")
+              check(order.items.item[1].shipDate == "1999-05-21", "shipDate present")
+
+              // Only one arm of the choice is populated.
+              check(order.creditCard != null && order.invoice == null, "choice")
+
+              // Equality and copy come free with a data class, which is the whole
+              // reason to generate one.
+              check(first == first.copy(), "data class equality")
+
+              println("kotlin: parsed the sample, ${order.items.item.size} items")
+          }
+          EOF
+          kotlinc generated/orders/Models.kt Check.kt -include-runtime -d check.jar
+          java -jar check.jar
+
+  swift:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+      - uses: swift-actions/setup-swift@v2
+        with:
+          swift-version: "5.10"
+      - name: Generate, compile and run against a real document
+        run: |
+          go run ./cmd/xsd2code-go generate --lang swift --out build/swift testdata/purchaseorder.xsd
+          cd build/swift
+          mkdir -p Sources/Orders
+          mv Models.swift Sources/Orders/
+          cp ../../testdata/purchaseorder.xml .
+          cat > Package.swift <<'EOF'
+          // swift-tools-version:5.9
+          import PackageDescription
+
+          let package = Package(
+              name: "Orders",
+              targets: [
+                  .executableTarget(name: "Orders", path: "Sources/Orders")
+              ]
+          )
+          EOF
+          cat > Sources/Orders/main.swift <<'EOF'
+          import Foundation
+
+          func check(_ ok: Bool, _ what: String) {
+              if !ok {
+                  FileHandle.standardError.write(Data("failed: \(what)\n".utf8))
+                  exit(1)
+              }
+          }
+
+          let url = URL(fileURLWithPath: "purchaseorder.xml")
+          let order = try loadPurchaseOrder(contentsOf: url)
+
+          check(order.orderDate == "1999-10-20", "orderDate: \(order.orderDate)")
+          check(order.status == .shipped, "status: \(String(describing: order.status))")
+          check(order.modifiedBy == "ada", "modifiedBy")
+
+          // Inherited members, declared on the struct because a Swift struct
+          // cannot inherit.
+          check(order.shipTo.name == "Alice Smith", "shipTo.name")
+          check(order.shipTo.street == ["123 Maple Street", "Apartment 4"], "street")
+          check(order.shipTo.zip == Decimal(string: "90952"), "zip")
+
+          // Repeated complex content.
+          check(order.items.item.count == 2, "item count")
+          let first = order.items.item[0]
+          check(first.partNum == "872-AA", "partNum")
+          check(first.quantity == 1, "quantity")
+
+          // Simple content: a value with an attribute on it.
+          check(first.price.value == Decimal(string: "148.95"), "price value")
+          check(first.price.currency == "USD", "price currency")
+
+          // An xs:list arrives split.
+          check(first.tags == ["garden", "power", "outdoor"], "tags")
+
+          // An absent optional element stays nil.
+          check(first.shipDate == nil, "shipDate absent")
+          check(order.items.item[1].shipDate == "1999-05-21", "shipDate present")
+
+          // Only one arm of the choice is populated.
+          check(order.creditCard != nil && order.invoice == nil, "choice")
+
+          print("swift: parsed the sample, \(order.items.item.count) items")
+          EOF
+          swift build
+          swift run Orders
+
+  # Each generated language is compiled, and where there is a runtime to do it
+  # with, actually run against a real document. "It compiles" is a weaker claim
+  # than this project should be making about its own output.
+  typescript:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Generate
+        run: |
+          go run ./cmd/xsd2code-go generate --lang typescript --out build/ts testdata/purchaseorder.xsd
+          go run ./cmd/xsd2code-go generate --lang javascript --out build/js testdata/purchaseorder.xsd
+      - name: Type-check the TypeScript under strict
+        working-directory: build/ts
+        run: |
+          npm install --no-save typescript@5.6
+          cat > tsconfig.json <<'EOF'
+          {
+            "compilerOptions": {
+              "strict": true,
+              "target": "ES2020",
+              "module": "ESNext",
+              "moduleResolution": "bundler",
+              "lib": ["ES2020", "DOM"],
+              "noEmit": true
+            },
+            "files": ["models.ts"]
+          }
+          EOF
+          ./node_modules/.bin/tsc -p tsconfig.json
+      - name: Run the JavaScript against a real document
+        working-directory: build/js
+        run: |
+          cp ../../testdata/purchaseorder.xml .
+          echo '{"type":"module"}' > package.json
+          npm install --no-save @xmldom/xmldom@0.9
+          cat > check.mjs <<'EOF'
+          import { DOMParser } from "@xmldom/xmldom";
+          import { readFileSync } from "fs";
+          import assert from "assert";
+          globalThis.DOMParser = DOMParser;
+          const m = await import("./models.js");
+          const po = m.parsePurchaseOrder(readFileSync("purchaseorder.xml", "utf8"));
+          assert.equal(po.orderDate, "1999-10-20");
+          assert.equal(po.status, "shipped");
+          assert.equal(po.shipTo.name, "Alice Smith");
+          assert.deepEqual(po.shipTo.street, ["123 Maple Street", "Apartment 4"]);
+          assert.equal(po.items.item.length, 2);
+          const i0 = po.items.item[0];
+          assert.equal(i0.partNum, "872-AA");
+          assert.equal(i0.quantity, 1);
+          assert.equal(i0.price.value, "148.95");
+          assert.equal(i0.price.currency, "USD");
+          assert.deepEqual(i0.tags, ["garden", "power", "outdoor"]);
+          assert.equal(i0.shipDate, undefined);
+          assert.ok(po.creditCard && !po.invoice);
+          console.log("javascript: parsed the sample");
+          EOF
+          node check.mjs
+
+  python:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Generate and run against a real document
+        run: |
+          go run ./cmd/xsd2code-go generate --lang python --out build/py testdata/purchaseorder.xsd
+          cp testdata/purchaseorder.xml build/py/
+          cd build/py
+          python -c "
+          import models
+          po = models.load_purchase_order('purchaseorder.xml')
+          assert po.order_date == '1999-10-20', po.order_date
+          assert po.status is models.OrderStatus.SHIPPED, po.status
+          assert po.ship_to.name == 'Alice Smith'
+          assert po.ship_to.street == ['123 Maple Street', 'Apartment 4']
+          assert len(po.items.item) == 2
+          i0 = po.items.item[0]
+          assert (i0.part_num, i0.quantity, i0.price.value, i0.price.currency) == ('872-AA', 1, '148.95', 'USD')
+          assert i0.tags == ['garden', 'power', 'outdoor']
+          assert i0.ship_date is None and po.items.item[1].ship_date == '1999-05-21'
+          assert po.credit_card is not None and po.invoice is None
+          assert models.USAddress.TABLE == 'us_address'
+          print('python: parsed the sample')
+          "
+
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Generate, build and test
+        run: |
+          go run ./cmd/xsd2code-go generate --lang rust --out build/rs testdata/purchaseorder.xsd
+          cd build/rs
+          mkdir -p src tests
+          mv models.rs src/lib.rs
+          cp ../../testdata/purchaseorder.xml .
+          cat > Cargo.toml <<'EOF'
+          [package]
+          name = "pomodels"
+          version = "0.1.0"
+          edition = "2021"
+
+          [dependencies]
+          serde = { version = "1", features = ["derive"] }
+          quick-xml = { version = "0.36", features = ["serialize"] }
+          EOF
+          cat > tests/roundtrip.rs <<'EOF'
+          use pomodels::*;
+
+          #[test]
+          fn parses_the_sample() {
+              let xml = std::fs::read_to_string("purchaseorder.xml").unwrap();
+              let po = parse_purchase_order(&xml).expect("parse");
+              assert_eq!(po.order_date, "1999-10-20");
+              assert_eq!(po.status, Some(OrderStatus::Shipped));
+              assert_eq!(po.ship_to.name, "Alice Smith");
+              assert_eq!(po.ship_to.street.len(), 2);
+              assert_eq!(po.items.item.len(), 2);
+              let i0 = &po.items.item[0];
+              assert_eq!(i0.part_num, "872-AA");
+              assert_eq!(i0.quantity, 1);
+              assert_eq!(i0.price.value, "148.95");
+              assert_eq!(i0.price.currency, "USD");
+              assert_eq!(i0.tags, vec!["garden", "power", "outdoor"]);
+              assert!(i0.ship_date.is_none());
+              assert!(po.credit_card.is_some() && po.invoice.is_none());
+          }
+          EOF
+          cargo test
+
+  cpp:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+      - name: Install pugixml
+        run: sudo apt-get update && sudo apt-get install -y libpugixml-dev
+      - name: Generate, compile and run
+        run: |
+          go run ./cmd/xsd2code-go generate --lang cpp --namespace orders --out build/cpp testdata/purchaseorder.xsd
+          cd build/cpp
+          cp ../../testdata/purchaseorder.xml .
+          cat > check.cpp <<'EOF'
+          #include <cassert>
+          #include <iostream>
+          #include "models.hpp"
+
+          int main() {
+              const auto po = orders::load_purchase_order("purchaseorder.xml");
+              assert(po.order_date == "1999-10-20");
+              assert(po.status && orders::to_string(*po.status) == std::string("shipped"));
+              assert(po.ship_to.name == "Alice Smith");
+              assert(po.ship_to.street.size() == 2);
+              assert(po.items.item.size() == 2);
+              const auto& i0 = po.items.item[0];
+              assert(i0.part_num == "872-AA");
+              assert(i0.quantity == 1);
+              assert(i0.price.value == "148.95");
+              assert(i0.price.currency == "USD");
+              assert(i0.tags.size() == 3);
+              assert(!i0.ship_date.has_value());
+              assert(po.credit_card && !po.invoice);
+              std::cout << "cpp: parsed the sample\n";
+              return 0;
+          }
+          EOF
+          g++ -std=c++17 -Wall -Wextra -Wno-unused-parameter -o check models.cpp check.cpp -lpugixml
+          ./check
+
+  # The DDL has to be accepted by a real server, not merely produced. Running
+  # it against an empty database is the cheapest way to catch a quoting or
+  # ordering mistake that no amount of string matching would.
+  postgres:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+        options: >-
+          --health-cmd pg_isready --health-interval 5s
+          --health-timeout 5s --health-retries 10
+        ports: ["5432:5432"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+      - name: Generate the schema and apply it
+        env:
+          PGPASSWORD: postgres
+        run: |
+          go run ./cmd/xsd2code-go generate --lang go --package orders \
+            --out build/go testdata/purchaseorder.xsd
+          psql -h localhost -U postgres -v ON_ERROR_STOP=1 -f build/go/schema.sql
+          psql -h localhost -U postgres -c '\dt'
+
+      # The other direction, against the schema the step above just created:
+      # this is the only test that exercises the introspection queries, and it
+      # closes the loop from XSD to DDL to database to XSD to code.
+      - name: Read the database back out and generate from it
+        env:
+          PGPASSWORD: postgres
+          DSN: postgres://postgres@localhost/postgres?sslmode=disable
+        run: |
+          go run ./cmd/xsd2code-go infer --database "$DSN" --out build/from-db.xsd
+
+          want() {
+            grep -qF "$1" build/from-db.xsd && return 0
+            echo "the inferred schema is missing: $1"
+            cat build/from-db.xsd
+            exit 1
+          }
+          # One type per table.
+          want '<xs:complexType name="PurchaseOrderType">'
+          want '<xs:complexType name="UsAddress">'
+          want '<xs:complexType name="ItemsItem">'
+          want '<xs:complexType name="Money">'
+          # A link table is repeated content on the parent. Getting this
+          # backwards leaves the parent empty and hangs the association off the
+          # child, which still produces a valid schema -- so the direction has
+          # to be asserted, not merely the presence of the types.
+          want '<xs:element name="item" type="ItemsItem" minOccurs="0" maxOccurs="unbounded">'
+          # A key that is also a foreign key onto another table's key is
+          # inheritance, not a nested copy of the row this one is part of.
+          want '<xs:extension base="AddressBase">'
+          # A CHECK constraint the DDL wrote comes back as an enumeration.
+          want '<xs:enumeration value="on-hold"/>'
+          # A relational schema does not record which values were attributes
+          # and which were text content, so Money comes back as two elements.
+          # What must survive is the type and its columns.
+          want '<xs:element name="currency" type="xs:string">'
+          # And the whole thing has to be a schema the generator can consume.
+          go run ./cmd/xsd2code-go generate --lang go --package fromdb \
+            --out build/fromdb build/from-db.xsd
+          go run ./cmd/xsd2code-go generate --lang python --database "$DSN" --out build/fromdb-py
+          test -s build/fromdb/models.go && test -s build/fromdb-py/models.py
+
+  build:
+    needs: [version, test, golang, csharp, java, kotlin, swift, typescript, python, rust, cpp, postgres]
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - { goos: windows, goarch: amd64, ext: .exe }
+          - { goos: windows, goarch: arm64, ext: .exe }
+          - { goos: linux, goarch: amd64 }
+          - { goos: linux, goarch: arm64 }
+          - { goos: darwin, goarch: amd64 }
+          - { goos: darwin, goarch: arm64 }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+      - name: Build
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "0"
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          name="xsd2code-go-${GOOS}-${GOARCH}${{ matrix.ext }}"
+          mkdir -p dist
+          go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" \
+            -o "dist/${name}" ./cmd/xsd2code-go
+      - uses: actions/upload-artifact@v4
+        with:
+          name: xsd2code-go-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: dist/*
+          if-no-files-found: error
+
+  # Linux packages, built from the binaries the matrix above produced so the
+  # packaged binary is byte-for-byte the one published beside it.
+  package:
+    needs: [version, build]
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        arch: [amd64, arm64]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: xsd2code-go-linux-${{ matrix.arch }}
+          path: dist
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+      - name: Install nfpm
+        run: go install github.com/goreleaser/nfpm/v2/cmd/nfpm@latest
+      - name: Build .deb and .rpm
+        env:
+          ARCH: ${{ matrix.arch }}
+          PKG_VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          cp "dist/xsd2code-go-linux-${ARCH}" packaging/xsd2code-go
+          chmod +x packaging/xsd2code-go
+          mkdir -p out
+          nfpm package -f packaging/nfpm.yaml -p deb -t out/
+          nfpm package -f packaging/nfpm.yaml -p rpm -t out/
+          ls -l out
+      - name: Check the package installs and runs
+        if: matrix.arch == 'amd64'
+        run: |
+          sudo dpkg -i out/*.deb
+          xsd2code-go version
+          test -f /usr/share/man/man1/xsd2code-go.1
+          man --warnings -P cat xsd2code-go | head -5
+          xsd2code-go generate --lang go --out /tmp/pkgcheck \
+            /usr/share/doc/xsd2code-go/examples/purchaseorder.xsd
+      - uses: actions/upload-artifact@v4
+        with:
+          name: xsd2code-go-packages-${{ matrix.arch }}
+          path: out/*
+          if-no-files-found: error
+
+  publish:
+    needs: [version, build, package]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: staging
+      - name: Collect binaries
+        run: |
+          mkdir -p dist
+          find staging -type f -exec mv {} dist/ \;
+          cd dist && sha256sum * > SHA256SUMS
+          ls -l
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          gh release create "v${VERSION}" dist/* \
+            --title "xsd2code-go v${VERSION}" \
+            --notes "Automated build of \`${{ github.sha }}\` from \`${{ github.ref_name }}\`." \
+            --latest

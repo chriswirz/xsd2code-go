@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<catalog updated="2024-02-11T08:00:00Z">
+  <product sku="118-ZZ" status="discontinued">
+    <name>Hose Reel</name>
+    <price>21.50</price>
+    <stock>0</stock>
+    <note>Replaced by 118-ZY.</note>
+  </product>
+</catalog>

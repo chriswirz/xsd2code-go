@@ -1,0 +1,47 @@
+# nfpm config used by the GitHub Actions pipeline to build .deb and .rpm
+# packages. ARCH and PKG_VERSION are supplied by the pipeline, which also stages
+# the binary for the target architecture at packaging/xsd2code-go (nfpm does
+# not expand environment variables inside contents paths).
+name: xsd2code-go
+arch: ${ARCH}
+platform: linux
+version: ${PKG_VERSION}
+section: devel
+priority: optional
+maintainer: xsd2code-go maintainers
+description: |
+  Turns XML Schema documents into data classes for C#, Java, Go, TypeScript,
+  JavaScript, Python, Rust and C++, and infers a schema from example XML
+  documents or from a live PostgreSQL database. The generated classes
+  deserialize XML through each language's standard binding, and carry the
+  mapping -- plus the DDL -- to store the same objects in Postgres.
+homepage: https://github.com/chriswirz/xsd2code-go
+license: MIT
+# No dependencies: the binary is statically linked Go, and the languages it
+# generates for are the caller's business, not the package's.
+contents:
+  - src: packaging/xsd2code-go
+    dst: /usr/bin/xsd2code-go
+    file_info:
+      mode: 0755
+  - src: README.md
+    dst: /usr/share/doc/xsd2code-go/README.md
+    file_info:
+      mode: 0644
+  # The man page, uncompressed: man reads it either way, and leaving it as it
+  # was written keeps the package reproducible.
+  - src: man/xsd2code-go.1
+    dst: /usr/share/man/man1/xsd2code-go.1
+    file_info:
+      mode: 0644
+  # A schema that exercises inheritance, a choice, an enumeration, groups,
+  # repeated content, an xs:list and simple content: the quickest way to see
+  # what the generator does with a real document type.
+  - src: testdata/purchaseorder.xsd
+    dst: /usr/share/doc/xsd2code-go/examples/purchaseorder.xsd
+    file_info:
+      mode: 0644
+  - src: testdata/purchaseorder.xml
+    dst: /usr/share/doc/xsd2code-go/examples/purchaseorder.xml
+    file_info:
+      mode: 0644
