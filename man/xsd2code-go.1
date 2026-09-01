@@ -297,10 +297,27 @@ recursive schema has no ordering problem. The schema's own documentation is
 carried into COMMENT ON statements.
 .SH DATABASES
 .B \-\-database
-takes a URL
-.RI ( postgres://user:pw@host/db )
-or libpq keyword/value pairs
-.RI ( "host=... dbname=..." ).
+takes a connection written any of the ways one usually is:
+.PP
+.TS
+tab(|);
+l l.
+URI|\fIpostgres://user:pw@host:5432/orders\fR, \fIpostgresql://\fR
+JDBC URL|\fIjdbc:postgresql://host:5432/orders?user=u&password=p\fR
+libpq pairs|\fIhost=db.internal port=5432 dbname=orders user=u\fR
+ADO.NET|\fIHost=db.internal;Database=orders;Username=u;Password=p\fR
+.TE
+.PP
+The last is the form the generated Entity Framework code connects with, so it
+is the string a C# project has to hand. It is translated into libpq pairs
+rather than passed through, and a setting that names nothing PostgreSQL has is
+reported: the driver ignores an unknown keyword instead of refusing it, so
+.I Host=localhost;Database=orders;Username=u
+handed straight to it would connect to no named database, as the operating
+system's user, with no password, and say nothing about it. Settings that
+configure the .NET driver alone \(em pool sizes, a command timeout \(em are
+dropped, since there is nothing here for them to mean.
+.PP
 .BR PGPASSWORD ,
 .B PGSERVICE
 and

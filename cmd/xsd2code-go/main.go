@@ -120,7 +120,8 @@ func generate(args []string) error {
 	ixml := fs.Bool("ixmlserializable", false,
 		"C# only: emit classes that implement IXmlSerializable, so the consuming application serializes without reflection")
 	stdout := fs.Bool("stdout", false, "write to standard output instead of files")
-	db := fs.String("database", "", "read the model from this PostgreSQL database instead of a schema file")
+	db := fs.String("database", "",
+		"read the model from this PostgreSQL database instead of a schema file: a URI, libpq pairs, or an ADO.NET string")
 	dbSchema := fs.String("db-schema", "public", "the Postgres schema to read, with --database")
 	dbViews := fs.Bool("db-views", false, "include views and materialized views, with --database")
 	dbKeys := fs.Bool("db-keys", false, "keep generated surrogate keys as content, with --database")
@@ -259,7 +260,8 @@ func inferCmd(args []string) error {
 		"how many values must be seen before an enumeration is inferred")
 	fs.BoolVar(&opts.Strings, "strings", false,
 		"give every value xs:string instead of inferring a datatype")
-	db := fs.String("database", "", "describe this PostgreSQL database instead of XML documents")
+	db := fs.String("database", "",
+		"describe this PostgreSQL database instead of XML documents: a URI, libpq pairs, or an ADO.NET string")
 	dbSchema := fs.String("db-schema", "public", "the Postgres schema to read, with --database")
 	dbViews := fs.Bool("db-views", false, "include views and materialized views, with --database")
 	dbKeys := fs.Bool("db-keys", false, "keep generated surrogate keys as content, with --database")
@@ -301,8 +303,15 @@ FROM DOCUMENTS
   as a contract.
 
 FROM A DATABASE
-  --database takes a URL (postgres://user:pw@host/db) or libpq keyword/value
-  pairs (host=... dbname=...). PGPASSWORD, PGSERVICE and ~/.pgpass are honoured.
+  --database takes a connection in any of the forms one is usually written in:
+  a URI (postgres://user:pw@host/db, and postgresql:// or a jdbc: prefix too),
+  libpq keyword/value pairs (host=... dbname=...), or the semicolon-separated
+  ADO.NET form the generated C# connects with (Host=...;Database=...). The
+  last is translated rather than guessed at: a setting that names nothing
+  PostgreSQL has is reported, because the driver would otherwise ignore it and
+  connect somewhere else.
+
+  PGPASSWORD, PGSERVICE and ~/.pgpass are honoured.
 
   One complex type per table. A single-column foreign key becomes nested
   content: the row it points at, in place. A table that exists only to join two

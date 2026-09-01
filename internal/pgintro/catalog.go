@@ -20,7 +20,8 @@ import (
 
 // Options controls introspection.
 type Options struct {
-	// DSN is the connection string: a URL, or libpq keyword/value pairs.
+	// DSN is the connection string, in any of the forms Normalize accepts: a
+	// URI, libpq keyword/value pairs, or the semicolon-separated ADO.NET form.
 	DSN string
 	// Schema is the Postgres schema to read. Empty means "public".
 	Schema string

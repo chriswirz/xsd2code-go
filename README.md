@@ -351,10 +351,27 @@ xsd2code-go generate --lang java --package com.acme.orders \
   --database "host=db.internal dbname=orders" --out ./src
 ```
 
-`--database` takes a URL or libpq keyword/value pairs. `PGPASSWORD`, `PGSERVICE`
-and `~/.pgpass` are honoured, so a password need never appear on the command
-line, where it would be visible to every other process on the machine and
-recorded in your shell history.
+`--database` takes a connection written any of the ways one usually is:
+
+| Form | Example |
+| --- | --- |
+| URI | `postgres://user:pw@host:5432/orders`, `postgresql://...` |
+| JDBC URL | `jdbc:postgresql://host:5432/orders?user=u&password=p` |
+| libpq pairs | `host=db.internal port=5432 dbname=orders user=u` |
+| ADO.NET | `Host=db.internal;Port=5432;Database=orders;Username=u;Password=p` |
+
+The last is the one the generated Entity Framework code connects with, so it is
+the string a C# project has to hand. It is translated into libpq pairs rather
+than passed through, and a setting naming nothing PostgreSQL has is reported:
+the driver ignores an unknown keyword instead of refusing it, so
+`Host=localhost;Database=orders;Username=u` handed straight to it would connect
+to *no named database as your operating system user with no password* and say
+nothing about it. Settings that configure the .NET driver alone - pool sizes, a
+command timeout - are dropped, since there is nothing for them to mean here.
+
+`PGPASSWORD`, `PGSERVICE` and `~/.pgpass` are honoured, so a password need never
+appear on the command line, where it would be visible to every other process on
+the machine and recorded in your shell history.
 
 - One complex type per table, named after it.
 - A single-column **foreign key** becomes nested content: the row it points at,
@@ -381,6 +398,78 @@ spelling.
 A model read this way keeps the names it found - the table, the columns and the
 primary key - so code generated from a database binds to that database rather
 than to a re-derived guess at it.
+
+### SSL
+
+`sslmode` is carried through whichever form you write the connection in, so the
+usual URI works as it stands:
+
+```
+xsd2code-go infer --database "postgres://user:pass@host:5432/db?sslmode=require"
+xsd2code-go infer --database "host=host port=5432 dbname=db user=user sslmode=require"
+xsd2code-go infer --database "Host=host;Port=5432;Database=db;Username=user;SSL Mode=Require"
+```
+
+The first two reach the driver as written. The third is translated: `SSL Mode`
+becomes `sslmode`, and .NET's run-together `VerifyCA` and `VerifyFull` become
+libpq's `verify-ca` and `verify-full`. `SslMode`, `ssl mode` and `SSL Mode` are
+all the same setting.
+
+| Mode | What it does |
+| --- | --- |
+| `disable` | no TLS |
+| `allow`, `prefer` | tries TLS, falls back to an unencrypted connection; `prefer` is the default |
+| `require` | TLS, but the server's certificate is not checked |
+| `verify-ca` | TLS, and the certificate must be signed by a trusted CA |
+| `verify-full` | as `verify-ca`, and the certificate must also match the hostname |
+
+Only `verify-full` protects against a server impersonating the one you named;
+`require` encrypts and nothing more. Use `sslrootcert` (`Root Certificate` in
+the ADO.NET form) to name the CA when it is not one the machine already trusts.
+
+### Adding a connection setting
+
+The translation lives in one file, `internal/pgintro/dsn.go`, in three maps, and
+`sslmode` is a worked example of all three parts. A setting you want to add
+belongs in one of them:
+
+**A setting that only needs renaming** takes one entry in `adoKeywords`, which
+maps a setting as .NET spells it to the libpq keyword it becomes. A name is
+lowercased and its whitespace collapsed before the lookup, so one entry covers
+`SslMode` and `sslmode`; the spaced spelling is a different key, which is why
+both appear:
+
+```go
+var adoKeywords = map[string]string{
+	...
+	"ssl mode": "sslmode",
+	"sslmode":  "sslmode",
+}
+```
+
+**A setting whose values are spelled differently on each side** takes a second
+entry in `adoValues`, keyed the same way. Without it, `SSL Mode=VerifyFull`
+would arrive as `sslmode=VerifyFull`, which is not a mode PostgreSQL has:
+
+```go
+var adoValues = map[string]func(string) string{
+	"ssl mode": adoSSLMode,
+	"sslmode":  adoSSLMode,
+}
+```
+
+**A setting that configures the client rather than the connection** - a pool
+size, a command timeout - goes in `adoClientOnly` instead, which is the list of
+settings dropped rather than reported. Put a setting there only when discarding
+it changes nothing about where you connect and as whom; anything
+security-relevant belongs in the other two maps, or nowhere, so that it is
+reported rather than quietly ignored.
+
+`TestADOKeywordsMapOntoRealKeywords` checks that whatever you map onto is a
+keyword PostgreSQL actually defines, so a typo in the target fails the suite
+rather than surfacing the day someone uses that setting. Add a case to
+`TestNormalizeADODetails` as well: it asserts the normalized string and then
+hands it to pgx, which is what proves a mapping is not merely stable but right.
 
 ## Building
 

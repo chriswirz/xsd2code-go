@@ -11,7 +11,14 @@ import (
 
 // Introspect connects to a database and describes it as a model.
 func Introspect(ctx context.Context, opts Options) (*ir.Model, error) {
-	conn, err := pgx.Connect(ctx, opts.DSN)
+	// Every way of writing a connection is turned into the one pgx reads
+	// first, and a string that would connect somewhere other than where it
+	// says is rejected here rather than at the far end.
+	dsn, err := Normalize(opts.DSN)
+	if err != nil {
+		return nil, err
+	}
+	conn, err := pgx.Connect(ctx, dsn)
 	if err != nil {
 		return nil, fmt.Errorf("connecting: %w", err)
 	}
